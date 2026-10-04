@@ -71,15 +71,23 @@ namespace MCPForUnity.Editor.Tools.AssetGen
                 Texture = p.GetBool("texture", true),
                 Tier = p.Get("tier"),
                 Model = model,
+                Meshy = provider == "meshy" ? MeshyModelOptions.FromParams(p) : null,
                 Name = p.Get("name"),
                 OutputFolder = p.Get("outputFolder"),
             };
             if (!AssetGenPaths.NormalizeOutputFolder(req.OutputFolder, out req.OutputFolder, out string outputErr))
                 return new ErrorResponse(outputErr);
 
-            if (req.Mode == "text" && string.IsNullOrWhiteSpace(req.Prompt))
+            if (req.Meshy != null)
+            {
+                if (req.Meshy.ModelType == "smart-topology" && string.IsNullOrWhiteSpace(p.Get("model")))
+                    req.Model = "meshy-t2";
+                req.Meshy.Validate(req);
+                if (req.Meshy.AutoSize == true && !p.Has("targetSize")) req.TargetSize = 0f;
+            }
+            if (req.Mode == "text" && string.IsNullOrWhiteSpace(req.Prompt) && string.IsNullOrEmpty(req.Meshy?.PreviewTaskId))
                 return new ErrorResponse("'prompt' is required for text mode.");
-            if (req.Mode == "image" && string.IsNullOrWhiteSpace(req.ImageUrl))
+            if (req.Mode == "image" && string.IsNullOrWhiteSpace(req.ImageUrl) && string.IsNullOrEmpty(req.Meshy?.InputTaskId))
             {
                 if (string.IsNullOrWhiteSpace(req.ImagePath))
                     return new ErrorResponse("image mode requires 'image_url' or 'image_path'.");

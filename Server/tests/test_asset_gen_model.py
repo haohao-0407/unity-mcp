@@ -196,3 +196,39 @@ class TestGenerateModelCLI:
         params = mock_run.call_args.args[1]
         assert command == COMMAND
         assert params == {"action": "status", "jobId": "abc123"}
+
+
+    def test_meshy_cli_parameters(self, cli_runner):
+        result, mock_run = cli_runner([
+            "generate-model", "--provider", "meshy", "--model", "meshy-t2",
+            "--target-polycount", "4000", "--texture-resolution", "4k", "--enable-pbr",
+            "--no-moderation", "--target-formats", "glb", "--target-formats", "fbx",
+        ])
+        assert result.exit_code == 0, result.output
+        params = mock_run.call_args.args[1]
+        assert params["target_polycount"] == 4000
+        assert params["texture_resolution"] == "4k"
+        assert params["enable_pbr"] is True
+        assert params["moderation"] is False
+        assert params["target_formats"] == ["glb", "fbx"]
+
+
+@pytest.mark.parametrize("options", [
+    {"model_type": "smart-topology", "target_polycount": 4000, "topology": "triangle"},
+    {"geometry_resolution": "4k", "should_remesh": True, "decimation_mode": 2, "pose_mode": "t-pose"},
+    {"enable_pbr": False, "texture_resolution": "8k", "texture_model": "meshy-7.1", "texture_prompt": "stone"},
+    {"texture_image_url": "https://example.com/t.png", "remove_lighting": False, "moderation": False},
+    {"target_formats": ["glb", "fbx"], "alpha_thumbnail": True, "auto_size": True, "origin_at": "center"},
+    {"preview_task_id": "preview"},
+    {"input_task_id": "image", "image_enhancement": False, "save_pre_remeshed_model": True, "multi_view_thumbnails": True},
+])
+def test_meshy_options_reach_unity_without_loss(options):
+    _, sent = _call_tool(action="generate", provider="meshy", **options)
+    assert _sent_params(sent) == {"action": "generate", "provider": "meshy", **options}
+
+
+def test_meshy_options_visible_in_mcp_schema():
+    from fastmcp.tools import Tool
+    schema = Tool.from_function(generate_model).parameters
+    for name in ("model_type", "target_polycount", "texture_resolution", "enable_pbr", "texture_model", "target_formats", "preview_task_id"):
+        assert name in schema["properties"]

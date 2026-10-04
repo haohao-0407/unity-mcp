@@ -95,7 +95,9 @@ namespace MCPForUnity.Editor.Services.AssetGen
 
             var job = NewJob("model", provider, "generate");
             job.Format = string.IsNullOrEmpty(req.Format) ? "glb" : req.Format;
-            job.TargetSize = req.TargetSize <= 0 ? 1f : req.TargetSize;
+            // Meshy auto_size must survive import unless the caller explicitly requested normalization.
+            job.TargetSize = provider == "meshy" && req.Meshy?.AutoSize == true && req.TargetSize <= 0
+                ? 0f : (req.TargetSize <= 0 ? 1f : req.TargetSize);
 
             if (!TryResolveKey(provider, job, out string apiKey)) return job;
 
@@ -481,7 +483,7 @@ namespace MCPForUnity.Editor.Services.AssetGen
         };
         private static readonly HashSet<string> ModelAllowedExtensions = new(StringComparer.OrdinalIgnoreCase)
         {
-            "glb", "gltf", "fbx", "obj", "usd", "usdz", "dae", "ply", "stl", "zip",
+            "glb", "gltf", "fbx", "obj", "usd", "usdz", "dae", "ply", "stl", "3mf", "zip",
         };
         // Fail closed: an unexpected kind allows nothing, so the RCE boundary never opens by default.
         private static readonly HashSet<string> NoAllowedExtensions = new(StringComparer.OrdinalIgnoreCase);

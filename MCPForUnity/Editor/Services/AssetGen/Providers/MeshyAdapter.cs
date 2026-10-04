@@ -31,6 +31,8 @@ namespace MCPForUnity.Editor.Services.AssetGen.Providers
         private bool _isImage;
         private bool _wantTexture = true;
         private string _aiModel = DefaultModel; // stashed so the refine task reuses the submit model
+        private JObject _refineBody;
+        private bool _directRefine;
         private string _refineTaskId;
         private bool _refineSubmitted;
 
@@ -39,11 +41,23 @@ namespace MCPForUnity.Editor.Services.AssetGen.Providers
             if (req == null) throw new ArgumentNullException(nameof(req));
             if (http == null) throw new ArgumentNullException(nameof(http));
 
+            var options = req.Meshy ?? new MeshyModelOptions();
+            options.Validate(req);
+            _refineSubmitted = false;
+            _refineTaskId = null;
+            _directRefine = !string.IsNullOrEmpty(options.PreviewTaskId);
             _format = string.IsNullOrEmpty(req.Format) ? "glb" : req.Format.TrimStart('.').ToLowerInvariant();
             _wantTexture = req.Texture;
-            _aiModel = string.IsNullOrEmpty(req.Model) ? DefaultModel : req.Model;
-            _isImage = string.Equals(req.Mode, "image", StringComparison.OrdinalIgnoreCase)
-                       && (!string.IsNullOrEmpty(req.ImageUrl) || !string.IsNullOrEmpty(req.ImagePath));
+            _aiModel = options.GeometryModel(req);
+            _isImage = string.Equals(req.Mode, "image", StringComparison.OrdinalIgnoreCase);
+            _refineBody = new JObject { ["mode"] = "refine", ["ai_model"] = options.RefineModel(req) };
+            options.ApplyShared(_refineBody);
+            options.ApplyTexture(_refineBody);
+            if (_directRefine)
+            {
+                _refineBody["preview_task_id"] = options.PreviewTaskId;
+                return await PostTask(TextEndpoint, _refineBody, apiKey, http, ct, "refine");
+            }
 
             JObject body;
             string url;
@@ -52,10 +66,10 @@ namespace MCPForUnity.Editor.Services.AssetGen.Providers
                 // image→3D textures in a single call (no separate refine task). image_url accepts a
                 // hosted URL or an inline base64 data URI (for a local image_path).
                 url = ImageEndpoint;
-                string imageRef = !string.IsNullOrEmpty(req.ImageUrl) ? req.ImageUrl : LocalImage.ToDataUri(req.ImagePath);
+                string imageRef = options.InputTaskId != null ? null : (!string.IsNullOrEmpty(req.ImageUrl) ? req.ImageUrl : LocalImage.ToDataUri(req.ImagePath));
                 body = new JObject
                 {
-                    ["image_url"] = imageRef,
+                    [options.InputTaskId != null ? "input_task_id" : "image_url"] = options.InputTaskId ?? imageRef,
                     ["ai_model"] = _aiModel,
                     ["should_texture"] = _wantTexture
                 };
@@ -72,6 +86,9 @@ namespace MCPForUnity.Editor.Services.AssetGen.Providers
                 };
             }
 
+            options.ApplyShared(body);
+            options.ApplyGeometry(body, req, _isImage);
+            if (_isImage && _wantTexture) options.ApplyTexture(body);
             return await PostTask(url, body, apiKey, http, ct, "submit");
         }
 
@@ -95,7 +112,7 @@ namespace MCPForUnity.Editor.Services.AssetGen.Providers
             var result = new ProviderPollResult { State = state };
 
             // Two-phase (text + texture) splits progress across preview (0..0.5) and refine (0.5..1).
-            bool twoPhase = !_isImage && _wantTexture;
+            bool twoPhase = !_isImage && _wantTexture && !_directRefine;
             float raw = 0f;
             JToken prog = json["progress"];
             if (prog != null && prog.Type != JTokenType.Null) raw = Mathf.Clamp01(prog.Value<float>() / 100f);
@@ -107,13 +124,8 @@ namespace MCPForUnity.Editor.Services.AssetGen.Providers
                 // polling it; never surface the untextured preview result.
                 if (twoPhase && !refinePhase)
                 {
-                    var refineBody = new JObject
-                    {
-                        ["mode"] = "refine",
-                        ["preview_task_id"] = providerJobId,
-                        ["ai_model"] = _aiModel
-                    };
-                    _refineTaskId = await PostTask(TextEndpoint, refineBody, apiKey, http, ct, "refine");
+                    _refineBody["preview_task_id"] = providerJobId;
+                    _refineTaskId = await PostTask(TextEndpoint, _refineBody, apiKey, http, ct, "refine");
                     _refineSubmitted = true;
                     result.State = ProviderPollState.Running;
                     result.Progress = 0.5f;
@@ -165,10 +177,7 @@ namespace MCPForUnity.Editor.Services.AssetGen.Providers
             if (urls == null) return null;
             string byFormat = urls[_format]?.ToString();
             if (!string.IsNullOrEmpty(byFormat)) return byFormat;
-            string glb = urls["glb"]?.ToString();
-            if (!string.IsNullOrEmpty(glb)) return glb;
-            string fbx = urls["fbx"]?.ToString();
-            return string.IsNullOrEmpty(fbx) ? null : fbx;
+            return null; // Never save GLB/FBX fallback bytes with a different requested extension.
         }
 
         private static ProviderPollState MapState(string status)

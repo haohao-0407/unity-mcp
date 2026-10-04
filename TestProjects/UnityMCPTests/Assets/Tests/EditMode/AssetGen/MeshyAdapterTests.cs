@@ -5,6 +5,7 @@ using System.Threading;
 using MCPForUnity.Editor.Services.AssetGen.Http;
 using MCPForUnity.Editor.Services.AssetGen.Providers;
 using NUnit.Framework;
+using Newtonsoft.Json.Linq;
 using UnityEngine;
 
 namespace MCPForUnityTests.Editor.AssetGen
@@ -231,6 +232,138 @@ namespace MCPForUnityTests.Editor.AssetGen
 
             Assert.AreEqual(ProviderPollState.Failed, res.State);
             Assert.IsNotEmpty(res.Error);
+        }
+
+        private static JObject RequestBody(FakeHttpTransport http, int index = 0)
+            => JObject.Parse(Encoding.UTF8.GetString(http.RecordedRequests[index].Body));
+
+        [Test]
+        public void T2_InfersSmartTopology_AndRefinesAt4kWithIndependentModel()
+        {
+            var http = new FakeHttpTransport { Handler = r => r.Method == "POST"
+                ? Json("{\"result\":\"task\"}") : Json("{\"status\":\"SUCCEEDED\",\"progress\":100}") };
+            var adapter = new MeshyAdapter();
+            var req = new ModelGenRequest { Mode = "text", Prompt = "tower", Model = "meshy-t2",
+                Meshy = new MeshyModelOptions { TargetPolycount = 4000, EnablePbr = true, TexturePrompt = "stone",
+                    Moderation = false, TargetFormats = new[] { "glb" }, AutoSize = true, OriginAt = "bottom" } };
+            adapter.SubmitAsync(req, "k", http, CancellationToken.None).GetAwaiter().GetResult();
+            var preview = RequestBody(http);
+            Assert.AreEqual("smart-topology", (string)preview["model_type"]);
+            Assert.AreEqual(4000, (int)preview["target_polycount"]);
+            Assert.IsNull(preview["texture_resolution"]);
+            Assert.IsNull(preview["enable_pbr"]);
+            adapter.PollAsync("task", "k", http, CancellationToken.None).GetAwaiter().GetResult();
+            var refine = RequestBody(http, 2);
+            Assert.AreEqual("meshy-7.1", (string)refine["ai_model"]);
+            Assert.AreEqual("4k", (string)refine["texture_resolution"]);
+            Assert.AreEqual(true, (bool)refine["enable_pbr"]);
+            Assert.AreEqual("stone", (string)refine["texture_prompt"]);
+            Assert.AreEqual(false, (bool)refine["moderation"]);
+            Assert.AreEqual("glb", (string)refine["target_formats"][0]);
+            Assert.AreEqual("bottom", (string)refine["origin_at"]);
+            Assert.IsNull(refine["target_polycount"]);
+            Assert.IsNull(refine["model_type"]);
+        }
+
+        [TestCase("2k")]
+        [TestCase("4k")]
+        [TestCase("8k")]
+        public void Image_ForwardsGeometryAndTextureOptions(string resolution)
+        {
+            var http = new FakeHttpTransport { Handler = _ => Json("{\"result\":\"task\"}") };
+            var req = new ModelGenRequest { Mode = "image", ImageUrl = "https://example.com/ref.png", Model = "meshy-7.1",
+                Meshy = new MeshyModelOptions { GeometryResolution = "4k", ShouldRemesh = true, Topology = "quad",
+                    DecimationMode = 3, PoseMode = "a-pose", TextureResolution = resolution, EnablePbr = false,
+                    TextureImageUrl = "https://example.com/texture.png", ImageEnhancement = false,
+                    SavePreRemeshedModel = true, MultiViewThumbnails = true, AlphaThumbnail = true } };
+            new MeshyAdapter().SubmitAsync(req, "k", http, CancellationToken.None).GetAwaiter().GetResult();
+            var body = RequestBody(http);
+            Assert.AreEqual("4k", (string)body["geometry_resolution"]);
+            Assert.AreEqual(resolution, (string)body["texture_resolution"]);
+            Assert.AreEqual("quad", (string)body["topology"]);
+            Assert.AreEqual(3, (int)body["decimation_mode"]);
+            Assert.AreEqual("a-pose", (string)body["pose_mode"]);
+            Assert.AreEqual(false, (bool)body["image_enhancement"]);
+            Assert.AreEqual(false, (bool)body["enable_pbr"]);
+            Assert.AreEqual(true, (bool)body["save_pre_remeshed_model"]);
+            Assert.AreEqual(true, (bool)body["multi_view_thumbnails"]);
+            Assert.AreEqual(true, (bool)body["alpha_thumbnail"]);
+            Assert.IsNull(body["mode"]);
+        }
+
+        [Test]
+        public void ExistingPreview_SubmitsOnlyRefine_AndPollsSinglePhase()
+        {
+            var http = new FakeHttpTransport { Handler = r => r.Method == "POST"
+                ? Json("{\"result\":\"refined\"}") : Json("{\"status\":\"IN_PROGRESS\",\"progress\":40}") };
+            var adapter = new MeshyAdapter();
+            string id = adapter.SubmitAsync(new ModelGenRequest { Mode = "text", Meshy = new MeshyModelOptions {
+                PreviewTaskId = "existing", TextureModel = "meshy-6", RemoveLighting = false } }, "k", http, CancellationToken.None).GetAwaiter().GetResult();
+            var body = RequestBody(http);
+            Assert.AreEqual("refine", (string)body["mode"]);
+            Assert.AreEqual("existing", (string)body["preview_task_id"]);
+            Assert.AreEqual("4k", (string)body["texture_resolution"]);
+            Assert.AreEqual(false, (bool)body["remove_lighting"]);
+            Assert.IsNull(body["prompt"]);
+            var result = adapter.PollAsync(id, "k", http, CancellationToken.None).GetAwaiter().GetResult();
+            Assert.AreEqual(0.4f, result.Progress, 0.001f);
+            StringAssert.EndsWith("/refined", http.RecordedRequests[1].Url);
+        }
+
+        [Test]
+        public void ImageTaskInput_AndGeometryOnly_OmitTextureFields()
+        {
+            var http = new FakeHttpTransport { Handler = _ => Json("{\"result\":\"task\"}") };
+            new MeshyAdapter().SubmitAsync(new ModelGenRequest { Mode = "image", Texture = false,
+                Meshy = new MeshyModelOptions { InputTaskId = "source" } }, "k", http, CancellationToken.None).GetAwaiter().GetResult();
+            var body = RequestBody(http);
+            Assert.AreEqual("source", (string)body["input_task_id"]);
+            Assert.IsNull(body["image_url"]);
+            Assert.IsNull(body["texture_resolution"]);
+            Assert.AreEqual(false, (bool)body["should_texture"]);
+        }
+
+        [TestCase("{ 'model_type':'smart-topology' }", "meshy-7.1")]
+        [TestCase("{ 'topology':'quad' }", "meshy-t2")]
+        [TestCase("{ 'target_polycount':15001 }", "meshy-t2")]
+        [TestCase("{ 'target_polycount':99 }", "meshy-t2")]
+        [TestCase("{ 'geometry_resolution':'4k' }", "meshy-6")]
+        [TestCase("{ 'texture_resolution':'1k' }", "meshy-7.1")]
+        [TestCase("{}", "meshy-6-lite")]
+        [TestCase("{ 'texture_prompt':'x', 'texture_image_url':'https://example.com/t.png' }", "meshy-6")]
+        [TestCase("{ 'target_formats':['fbx'] }", "meshy-6")]
+        [TestCase("{ 'origin_at':'center' }", "meshy-6")]
+        [TestCase("{ 'decimation_mode':0 }", "meshy-6")]
+        [TestCase("{ 'should_remesh':true }", "meshy-t2")]
+        public void InvalidOptions_FailBeforeNetwork(string json, string model)
+        {
+            var http = new FakeHttpTransport();
+            var options = MeshyModelOptions.FromParams(new MCPForUnity.Editor.Helpers.ToolParams(JObject.Parse(json)));
+            Assert.Throws<ArgumentException>(() => new MeshyAdapter().SubmitAsync(
+                new ModelGenRequest { Mode = "text", Prompt = "test", Model = model, Meshy = options },
+                "k", http, CancellationToken.None).GetAwaiter().GetResult());
+            Assert.AreEqual(0, http.RecordedRequests.Count);
+        }
+
+        [Test]
+        public void Lite_CanExplicitlyUse2kOrOverrideTexturingModel()
+        {
+            var req = new ModelGenRequest { Mode = "text", Model = "meshy-6-lite" };
+            Assert.DoesNotThrow(() => new MeshyModelOptions { TextureResolution = "2k" }.Validate(req));
+            Assert.DoesNotThrow(() => new MeshyModelOptions { TextureModel = "meshy-7.1" }.Validate(req));
+        }
+
+        [Test]
+        public void ThreeMf_ExplicitlyRequested_AndMissingFormatDoesNotUseGlbBytes()
+        {
+            var http = new FakeHttpTransport { Handler = r => r.Method == "POST"
+                ? Json("{\"result\":\"task\"}") : Json("{\"status\":\"SUCCEEDED\",\"model_urls\":{\"glb\":\"https://example.com/a.glb\"}}") };
+            var adapter = new MeshyAdapter();
+            adapter.SubmitAsync(new ModelGenRequest { Mode = "text", Prompt = "tower", Format = "3mf", Texture = false }, "k", http, CancellationToken.None).GetAwaiter().GetResult();
+            Assert.AreEqual("3mf", (string)RequestBody(http)["target_formats"][0]);
+            var result = adapter.PollAsync("task", "k", http, CancellationToken.None).GetAwaiter().GetResult();
+            Assert.AreEqual(ProviderPollState.Failed, result.State);
+            Assert.IsNull(result.DownloadUrl);
         }
     }
 }

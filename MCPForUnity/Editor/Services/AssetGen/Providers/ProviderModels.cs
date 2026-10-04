@@ -41,6 +41,7 @@ namespace MCPForUnity.Editor.Services.AssetGen.Providers
         public float TargetSize = 1f;
         public bool Texture = true;
         public string Tier;
+        public MeshyModelOptions Meshy; // Meshy-only options, never sent to other providers
         public string Model; // provider model id/version; null => adapter DefaultModel
         public string Name;
         public string OutputFolder;

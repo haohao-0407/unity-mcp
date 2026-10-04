@@ -161,5 +161,73 @@ namespace MCPForUnityTests.Editor.AssetGen
             JObject resp = Call(new JObject { ["action"] = "frobnicate" });
             Assert.AreEqual(false, (bool)resp["success"]);
         }
+
+        [TestCase("{ 'target_polycount': 16000, 'model': 'meshy-t2' }")]
+        [TestCase("{ 'enable_pbr': 'invalid' }")]
+        [TestCase("{ 'target_polycount': 'invalid' }")]
+        [TestCase("{ 'target_formats': [] }")]
+        [TestCase("{ 'texture_resolution': '16k' }")]
+        public void Meshy_InvalidOptions_ReturnSynchronousError(string json)
+        {
+            _store.Set("meshy", "k");
+            var p = JObject.Parse(json);
+            p["action"] = "generate";
+            p["provider"] = "meshy";
+            p["prompt"] = "tower";
+            var result = Call(p);
+            Assert.AreEqual(false, (bool)result["success"]);
+            Assert.IsNull(result["_mcp_status"]);
+        }
+
+        [Test]
+        public void Meshy_ExistingPreview_DoesNotRequirePrompt()
+        {
+            _store.Set("meshy", "k");
+            var result = Call(new JObject { ["action"] = "generate", ["provider"] = "meshy", ["preview_task_id"] = "existing" });
+            Assert.AreEqual("pending", (string)result["_mcp_status"]);
+        }
+
+        [Test]
+        public void Meshy_ImageTask_DoesNotRequireLocalImage()
+        {
+            _store.Set("meshy", "k");
+            var result = Call(new JObject { ["action"] = "generate", ["provider"] = "meshy", ["mode"] = "image", ["input_task_id"] = "image" });
+            Assert.AreEqual("pending", (string)result["_mcp_status"]);
+        }
+
+        [TestCase(false)]
+        [TestCase(true)]
+        public void Meshy_AutoSize_PreservesCloudSizeUnlessExplicitlyOverridden(bool overrideSize)
+        {
+            _store.Set("meshy", "k");
+            var p = new JObject { ["action"] = "generate", ["provider"] = "meshy", ["prompt"] = "tower", ["auto_size"] = true };
+            if (overrideSize) p["target_size"] = 2f;
+            var response = Call(p);
+            string id = (string)response["data"]["job_id"];
+            Assert.AreEqual(overrideSize ? 2f : 0f, AssetGenJobManager.GetJob(id).TargetSize);
+        }
+
+        [Test]
+        public void Meshy_HandlerOptions_ReachPreviewAndDefault4kRefine()
+        {
+            _store.Set("meshy", "k");
+            var fake = new FakeHttpTransport { Handler = request => new HttpResult {
+                Status = 200, IsSuccess = true, Text = request.Method == "POST"
+                    ? "{\"result\":\"task\"}" : "{\"status\":\"SUCCEEDED\",\"progress\":100}" } };
+            AssetGenJobManager.TransportOverrideForTests = fake;
+            AssetGenJobManager.PollIntervalSeconds = 0;
+            var p = new JObject { ["action"] = "generate", ["provider"] = "meshy", ["prompt"] = "tower",
+                ["model_type"] = "smart-topology", ["target_polycount"] = 4000, ["enable_pbr"] = true };
+            var response = Call(p);
+            string id = (string)response["data"]["job_id"];
+            for (int i = 0; i < 20 && fake.RecordedRequests.Count < 3; i++) AssetGenJobManager.TryAdvanceForTests(id);
+            Assert.GreaterOrEqual(fake.RecordedRequests.Count, 3);
+            var preview = JObject.Parse(System.Text.Encoding.UTF8.GetString(fake.RecordedRequests[0].Body));
+            var refine = JObject.Parse(System.Text.Encoding.UTF8.GetString(fake.RecordedRequests[2].Body));
+            Assert.AreEqual("meshy-t2", (string)preview["ai_model"]);
+            Assert.AreEqual(4000, (int)preview["target_polycount"]);
+            Assert.AreEqual("4k", (string)refine["texture_resolution"]);
+            Assert.AreEqual(true, (bool)refine["enable_pbr"]);
+        }
     }
 }

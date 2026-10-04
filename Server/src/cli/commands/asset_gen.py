@@ -67,6 +67,29 @@ def list_models(kind: str, provider: Optional[str], refresh: bool, search: Optio
 @click.option("--model", default=None, help="Provider model id/version (omit for the GUI-selected default).")
 @click.option("--name", default=None, help="Base name for the imported asset.")
 @click.option("--output-folder", default=None, help="Destination folder under Assets/.")
+@click.option("--model-type", default=None, help="Meshy geometry family: standard or smart-topology. Inferred for meshy-t2.")
+@click.option("--geometry-resolution", default=None, help="Meshy geometry resolution: standard, 2k or 4k (7.1/latest only).")
+@click.option("--should-remesh/--no-should-remesh", default=None, help="Meshy standard-model remeshing switch.")
+@click.option("--topology", default=None, help="Meshy topology: triangle or quad. T2 requires triangle.")
+@click.option("--decimation-mode", default=None, type=int, help="Meshy adaptive decimation level 1..4; overrides target_polycount.")
+@click.option("--target-polycount", default=None, type=int, help="Meshy face target: 100..15000 for T2; 100..300000 with standard remeshing.")
+@click.option("--pose-mode", default=None, help="Meshy pose: empty string, a-pose, or t-pose.")
+@click.option("--enable-pbr/--no-enable-pbr", default=None, help="Generate Meshy PBR maps in addition to base color.")
+@click.option("--texture-resolution", default=None, help="Meshy texture resolution: 2k, 4k (default), or 8k. 6-lite requires 2k.")
+@click.option("--texture-model", default=None, help="Meshy text refine model override. T2 defaults to meshy-7.1 for texturing; image mode cannot override.")
+@click.option("--texture-prompt", default=None, help="Meshy texturing guidance, max 800 characters; exclusive with texture_image_url.")
+@click.option("--texture-image-url", default=None, help="Meshy texture reference image URL or data URI; exclusive with texture_prompt.")
+@click.option("--remove-lighting/--no-remove-lighting", default=None, help="Meshy 6 only: remove baked lighting from base color.")
+@click.option("--moderation/--no-moderation", default=None, help="Meshy input moderation for geometry and texturing.")
+@click.option("--target-formats", multiple=True, help="Meshy cloud output formats: glb, fbx, obj, stl, usdz, 3mf. Must include format selected for download.")
+@click.option("--alpha-thumbnail/--no-alpha-thumbnail", default=None, help="Request Meshy transparent preview thumbnail.")
+@click.option("--auto-size/--no-auto-size", default=None, help="Meshy real-world size estimation. Omit target_size to preserve the cloud size.")
+@click.option("--origin-at", default=None, help="Meshy origin: bottom or center; requires auto_size=true.")
+@click.option("--preview-task-id", default=None, help="Meshy text mode: refine an existing successful preview without generating geometry again.")
+@click.option("--input-task-id", default=None, help="Meshy image mode: source task from Text/Image to Image; exclusive with image_url/image_path.")
+@click.option("--image-enhancement/--no-image-enhancement", default=None, help="Meshy image mode: enhance source image (6/7.1/latest only).")
+@click.option("--save-pre-remeshed-model/--no-save-pre-remeshed-model", default=None, help="Meshy image mode: also save pre-remesh GLB in cloud results.")
+@click.option("--multi-view-thumbnails/--no-multi-view-thumbnails", default=None, help="Meshy image mode: request four cardinal-view thumbnails.")
 @handle_unity_errors
 def generate_model(
     provider: Optional[str],
@@ -81,6 +104,7 @@ def generate_model(
     model: Optional[str],
     name: Optional[str],
     output_folder: Optional[str],
+    **meshy_options: Any,
 ):
     """Generate a 3D model with an AI provider.
 
@@ -106,6 +130,8 @@ def generate_model(
         "name": name,
         "outputFolder": output_folder,
     }
+    optional.update({k: (list(v) if isinstance(v, tuple) else v)
+                     for k, v in meshy_options.items() if v is not None and v != ()})
     params.update({k: v for k, v in optional.items() if v is not None})
 
     result = run_command("generate_model", params, config)
