@@ -29,6 +29,8 @@ from transport.legacy.unity_connection import async_send_command_with_retry
         "tier, model, name, output_folder. Meshy also supports geometry/topology, PBR, "
         "texture guidance, output and sizing options; texture_resolution defaults to 4k. "
         "Meshy T2, 7.1 and latest require mode=image and image_path/image_url/input_task_id. Generate and inspect a reference image first; text fallback is disabled. T1/lowpoly is disabled. Use preview_task_id with text-capable geometry models to texture an existing preview.\n"
+        "- resume: Continue a persisted Meshy job using job_id, or attach a remote task with provider_task_id and mode (image|text). Does not resubmit geometry.\n"
+        "- list_jobs: List local model jobs and persisted Meshy task IDs.\n"
         "- status: Poll an async job by job_id -> { state, progress, assetPath?, error? }.\n"
         "- cancel: Cancel an in-flight job by job_id.\n"
         "- list_providers: List configured 3D providers and capabilities (no key values).\n"
@@ -42,7 +44,7 @@ from transport.legacy.unity_connection import async_send_command_with_retry
 )
 async def generate_model(
     ctx: Context,
-    action: Annotated[Literal["generate", "status", "cancel", "list_providers", "list_models", "refresh_models"],
+    action: Annotated[Literal["generate", "resume", "list_jobs", "status", "cancel", "list_providers", "list_models", "refresh_models"],
                       "Action to perform."],
 
     provider: Annotated[str, "Provider id (tripo, meshy, fal). fal supports GLB output."] | None = None,
@@ -81,7 +83,8 @@ async def generate_model(
     multi_view_thumbnails: Annotated[bool, "Meshy image mode: request four cardinal-view thumbnails."] | None = None,
     name: Annotated[str, "Base name for the imported asset."] | None = None,
     output_folder: Annotated[str, "Destination folder under Assets/ for the import."] | None = None,
-    job_id: Annotated[str, "Job id for status/cancel."] | None = None,
+    job_id: Annotated[str, "Local job id for status/cancel/resume."] | None = None,
+    provider_task_id: Annotated[str, "Meshy remote task ID to resume with explicit mode=image or text; no generation submission."] | None = None,
     search: Annotated[str, "Filter list_models by name, id or use case."] | None = None,
     limit: Annotated[int, "Model page size (1..200; default 50)."] | None = None,
     offset: Annotated[int, "Model page offset (default 0)."] | None = None,
@@ -126,6 +129,7 @@ async def generate_model(
         "name": name,
         "outputFolder": output_folder,
         "jobId": job_id,
+        "provider_task_id": provider_task_id,
         "search": search,
         "limit": limit,
         "offset": offset,

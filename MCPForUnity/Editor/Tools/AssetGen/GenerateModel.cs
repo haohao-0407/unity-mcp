@@ -27,6 +27,8 @@ namespace MCPForUnity.Editor.Tools.AssetGen
                 switch (action)
                 {
                     case "generate": return Generate(p);
+                    case "resume": return Resume(p);
+                    case "list_jobs": return AssetGenToolHelpers.ListModelJobs(p);
                     case "status": return AssetGenToolHelpers.Status(p, "3D model", 3.0);
                     case "cancel": return AssetGenToolHelpers.Cancel(p);
                     case "list_providers": return AssetGenToolHelpers.ListProviders("model");
@@ -34,7 +36,7 @@ namespace MCPForUnity.Editor.Tools.AssetGen
                     case "refresh_models": return AssetGenToolHelpers.ListModels(p, "model", true);
                     case "": return new ErrorResponse("'action' parameter is required.");
                     default:
-                        return new ErrorResponse($"Unknown action: '{action}'. Supported: generate, status, cancel, list_providers, list_models, refresh_models.");
+                        return new ErrorResponse($"Unknown action: '{action}'. Supported: generate, resume, list_jobs, status, cancel, list_providers, list_models, refresh_models.");
                 }
             }
             catch (NotSupportedException nse)
@@ -45,6 +47,23 @@ namespace MCPForUnity.Editor.Tools.AssetGen
             {
                 return new ErrorResponse(SecretRedactor.Scrub(e.Message));
             }
+        }
+
+        private static object Resume(ToolParams p)
+        {
+            if (p.Get("provider") != null && p.Get("provider") != "meshy")
+                return new ErrorResponse("resume currently supports Meshy model jobs only.");
+            string jobId = p.Get("job_id"), taskId = p.Get("provider_task_id");
+            if (!string.IsNullOrWhiteSpace(jobId) && !string.IsNullOrWhiteSpace(taskId))
+                return new ErrorResponse("Supply job_id or provider_task_id, not both.");
+            AssetGenJob job = !string.IsNullOrWhiteSpace(jobId)
+                ? AssetGenJobManager.ResumeMeshyJob(jobId)
+                : AssetGenJobManager.RecoverMeshyTask(taskId, p.Get("mode")?.ToLowerInvariant(), p.Get("format", "glb"),
+                    p.Get("name"), p.Get("outputFolder"), p.GetFloat("targetSize", 1f) ?? 1f);
+            if (job.State == AssetGenJobState.Failed) return new ErrorResponse(job.Error, AssetGenToolHelpers.JobData(job));
+            if (job.State == AssetGenJobState.Done) return new SuccessResponse("Model already imported.", AssetGenToolHelpers.JobData(job));
+            return new PendingResponse("Resuming the existing Meshy task; no generation resubmission.",
+                pollIntervalSeconds: 3.0, data: AssetGenToolHelpers.JobData(job));
         }
 
         private static object Generate(ToolParams p)

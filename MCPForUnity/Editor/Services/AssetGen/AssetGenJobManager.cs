@@ -17,8 +17,8 @@ namespace MCPForUnity.Editor.Services.AssetGen
     public enum AssetGenJobState { Queued, Running, Importing, Done, Failed, Canceled }
 
     /// <summary>
-    /// Snapshot of a generation/import job. Persisted to SessionState so a `status` query
-    /// still works after an unrelated domain reload. NEVER carries a key or secret.
+    /// Snapshot of a generation/import job. SessionState tracks all jobs; Meshy model jobs
+    /// also use an atomic disk journal for reload/restart recovery. Never stores API keys.
     /// </summary>
     public sealed class AssetGenJob
     {
@@ -34,6 +34,17 @@ namespace MCPForUnity.Editor.Services.AssetGen
         public string AssetPath;
         public string AssetGuid;
         public string Error;
+        public string ProviderTaskId;
+        public string ProviderRootTaskId;
+        public long UpdatedAtUnixMs;
+        public long DeadlineUnixMs;
+        public MeshyTaskCheckpoint MeshyCheckpoint;
+        public string RecoveryOutputFolder;
+        public string RecoveryName;
+        public string DownloadedPath;
+        public bool CanResume => Provider == "meshy" && Kind == "model" && State != AssetGenJobState.Done
+            && MeshyCheckpoint != null && !MeshyCheckpoint.SubmissionPending
+            && !string.IsNullOrEmpty(MeshyCheckpoint.RootTaskId);
     }
 
     /// <summary>
@@ -63,28 +74,144 @@ namespace MCPForUnity.Editor.Services.AssetGen
         private static readonly List<string> _tickIds = new();
         private static bool _ticking;
 
+        private static string _journalDirectoryForTests;
+        internal static string JournalDirectory => _journalDirectoryForTests ??
+            Path.GetFullPath(Path.Combine(Application.dataPath, "../Library/MCPForUnity/AssetGenJobs"));
+
         static AssetGenJobManager()
         {
-            try
+            // AssetDatabase and the secure store are used only after domain initialization finishes.
+            EditorApplication.update += RestoreWhenReady;
+            AssemblyReloadEvents.beforeAssemblyReload += BeforeReload;
+        }
+
+        private static void RestoreWhenReady()
+        {
+            if (EditorApplication.isCompiling || EditorApplication.isUpdating) return;
+            EditorApplication.update -= RestoreWhenReady;
+            RestorePersistedJobs();
+        }
+
+        private static void BeforeReload()
+        {
+            foreach (var runner in new List<Runner>(Runners.Values)) Persist(runner.Job);
+        }
+
+        internal static void RestorePersistedJobs()
+        {
+            var recovered = new Dictionary<string, AssetGenJob>();
+            void Load(string json)
             {
-                string index = SessionState.GetString(JobIndexKey, string.Empty);
-                if (string.IsNullOrEmpty(index)) return;
-                foreach (string id in index.Split(new[] { ',' }, StringSplitOptions.RemoveEmptyEntries))
-                {
-                    string json = SessionState.GetString(JobKeyPrefix + id, string.Empty);
-                    if (string.IsNullOrEmpty(json)) continue;
+                try {
                     var job = JsonConvert.DeserializeObject<AssetGenJob>(json);
-                    if (job == null) continue;
-                    if (!IsTerminal(job.State))
-                    {
-                        job.State = AssetGenJobState.Failed;
-                        job.Error = "Interrupted by an editor reload; please retry.";
-                        Persist(job);
+                    if (job == null || !Guid.TryParseExact(job.JobId, "N", out _)) return;
+                    if (!recovered.TryGetValue(job.JobId, out var old) || job.UpdatedAtUnixMs >= old.UpdatedAtUnixMs)
+                        recovered[job.JobId] = job;
+                } catch { /* A bad record must not prevent recovery of other jobs. */ }
+            }
+            try {
+                if (Directory.Exists(JournalDirectory))
+                    foreach (string file in Directory.GetFiles(JournalDirectory, "*.json")) {
+                        try { Load(File.ReadAllText(file)); } catch { }
                     }
-                    Jobs[id] = job;
+            } catch (Exception e) { Debug.LogWarning("Asset generation journal unavailable: " + SecretRedactor.Scrub(e.Message)); }
+            string index = SessionState.GetString(JobIndexKey, string.Empty);
+            foreach (string id in index.Split(new[] { ',' }, StringSplitOptions.RemoveEmptyEntries))
+                Load(SessionState.GetString(JobKeyPrefix + id, string.Empty));
+            foreach (var job in recovered.Values)
+            {
+                if (Runners.ContainsKey(job.JobId)) continue;
+                Jobs[job.JobId] = job;
+                if (IsTerminal(job.State)) continue;
+                if (job.CanResume)
+                {
+                    try { ResumeMeshyJob(job.JobId, false); }
+                    catch (Exception e) { job.State = AssetGenJobState.Failed; job.Error = SecretRedactor.Scrub(e.Message); Persist(job); }
+                }
+                else
+                {
+                    job.State = AssetGenJobState.Failed;
+                    job.Error = job.Provider == "meshy"
+                        ? "Editor reloaded before a confirmed remote task ID was recorded. Submission outcome may be unknown; generation was NOT resubmitted. Find the task in Meshy and use resume with provider_task_id and mode."
+                        : "Interrupted by an editor reload. Automatic recovery is currently supported for Meshy models only.";
+                    Persist(job);
                 }
             }
-            catch { /* recovery is best-effort */ }
+        }
+
+        internal static void SimulateReloadForTests(bool clearSession = false)
+        {
+            BeforeReload();
+            foreach (var runner in Runners.Values) { runner.Cts.Cancel(); runner.Cts.Dispose(); }
+            Runners.Clear(); Jobs.Clear();
+            if (clearSession) {
+                string index = SessionState.GetString(JobIndexKey, string.Empty);
+                foreach (string id in index.Split(new[] { ',' }, StringSplitOptions.RemoveEmptyEntries)) SessionState.EraseString(JobKeyPrefix + id);
+                SessionState.EraseString(JobIndexKey);
+            }
+            RestorePersistedJobs();
+        }
+
+        private static void AttachCheckpoint(MeshyAdapter adapter, AssetGenJob job)
+        {
+            adapter.Checkpoint = state => {
+                job.MeshyCheckpoint = state;
+                job.ProviderRootTaskId = state.RootTaskId;
+                job.ProviderTaskId = state.CurrentTaskId;
+                Persist(job, true);
+            };
+        }
+
+        public static AssetGenJob ResumeMeshyJob(string jobId, bool renewTimeout = true)
+        {
+            var job = GetJob(jobId) ?? throw new ArgumentException("Unknown job_id. Use list_jobs or supply provider_task_id and mode for a Meshy task.");
+            if (job.Provider != "meshy" || job.Kind != "model") throw new ArgumentException("resume currently supports Meshy model jobs only.");
+            if (Runners.ContainsKey(jobId) || job.State == AssetGenJobState.Done) return job;
+            if (!job.CanResume) throw new ArgumentException("No confirmed recoverable Meshy task. Supply provider_task_id and mode; generation will not be resubmitted.");
+            var adapter = new MeshyAdapter();
+            adapter.Restore(job.MeshyCheckpoint);
+            if (!TryResolveKey("meshy", job, out string apiKey)) return job;
+            if (renewTimeout) job.DeadlineUnixMs = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() + (long)(TimeoutSeconds * 1000);
+            AttachCheckpoint(adapter, job);
+            var transport = TransportOverrideForTests ?? new UnityWebRequestTransport();
+            bool downloaded = !string.IsNullOrEmpty(job.DownloadedPath)
+                && AssetGenPaths.TryGetAssetsFolder(Path.GetDirectoryName(job.DownloadedPath)?.Replace('\\', '/'), out _)
+                && IsAllowedResultExtension("model", Path.GetExtension(job.DownloadedPath))
+                && File.Exists(AssetGenPaths.ToAbsolute(job.DownloadedPath));
+            job.State = downloaded ? AssetGenJobState.Importing : AssetGenJobState.Running;
+            job.Error = null;
+            var runner = new Runner {
+                Job = job, ProviderJobId = job.MeshyCheckpoint.RootTaskId,
+                Phase = downloaded ? RunnerPhase.Import : RunnerPhase.Poll, LocalPath = downloaded ? job.DownloadedPath : null,
+                PollFn = (pid, ct) => adapter.PollAsync(pid, apiKey, transport, ct),
+                ImportFn = ImportOverrideForTests ?? ModelImportPipeline.ImportInto, Transport = transport,
+                OutputFolder = job.RecoveryOutputFolder, Name = job.RecoveryName ?? ("asset_" + job.JobId.Substring(0, 8)),
+                Ext = job.Format ?? "glb", Subfolder = "Models"
+            };
+            Register(job, runner);
+            return job;
+        }
+
+        public static AssetGenJob RecoverMeshyTask(string taskId, string mode, string format, string name, string outputFolder, float targetSize)
+        {
+            if (string.IsNullOrWhiteSpace(taskId)) throw new ArgumentException("provider_task_id is required.");
+            if (mode != "image" && mode != "text") throw new ArgumentException("Specify mode=image or text to identify the remote task endpoint.");
+            format = (format ?? "glb").TrimStart('.').ToLowerInvariant();
+            if (!IsAllowedResultExtension("model", format)) throw new ArgumentException("Unsupported model format.");
+            if (!AssetGenPaths.NormalizeOutputFolder(outputFolder, out outputFolder, out string error)) throw new ArgumentException(error);
+            // Reuse the local job if this remote phase was already tracked; never download it twice on repeated resume.
+            foreach (var existing in Jobs.Values)
+                if (existing.Provider == "meshy" && existing.MeshyCheckpoint?.IsImage == (mode == "image")
+                    && existing.ProviderTaskId == taskId && existing.MeshyCheckpoint?.SubmissionPending != true)
+                    return ResumeMeshyJob(existing.JobId);
+            var job = NewJob("model", "meshy", "resume");
+            job.Format = format; job.TargetSize = targetSize; job.RecoveryOutputFolder = outputFolder;
+            job.RecoveryName = NameFrom(name, null, job.JobId);
+            job.ProviderRootTaskId = job.ProviderTaskId = taskId;
+            // Attaching an existing task is polling only, including text previews. Never create a refine here.
+            job.MeshyCheckpoint = new MeshyTaskCheckpoint { RootTaskId = taskId, IsImage = mode == "image", Format = format, WantTexture = false, DirectRefine = true };
+            Jobs[job.JobId] = job;
+            return ResumeMeshyJob(job.JobId);
         }
 
         public static AssetGenJob StartModelGeneration(ModelGenRequest req)
@@ -122,6 +249,12 @@ namespace MCPForUnity.Editor.Services.AssetGen
                 Name = NameFrom(req.Name, req.Prompt, job.JobId),
                 Subfolder = "Models",
             };
+            if (adapter is MeshyAdapter meshy)
+            {
+                job.RecoveryOutputFolder = runner.OutputFolder;
+                job.RecoveryName = runner.Name;
+                AttachCheckpoint(meshy, job);
+            }
             Register(job, runner);
             return job;
         }
@@ -236,6 +369,7 @@ namespace MCPForUnity.Editor.Services.AssetGen
         public static IReadOnlyList<AssetGenJob> RecentJobs(int max = 20)
         {
             var all = new List<AssetGenJob>(Jobs.Values);
+            all.Sort((a, b) => a.UpdatedAtUnixMs.CompareTo(b.UpdatedAtUnixMs));
             int start = Math.Max(0, all.Count - max);
             var slice = all.GetRange(start, all.Count - start);
             slice.Reverse();
@@ -248,6 +382,8 @@ namespace MCPForUnity.Editor.Services.AssetGen
             if (Runners.TryGetValue(jobId, out var r))
             {
                 r.Canceled = true;
+                r.Job.State = AssetGenJobState.Canceled;
+                Persist(r.Job);
                 try { r.Cts.Cancel(); } catch { }
                 return true;
             }
@@ -306,6 +442,7 @@ namespace MCPForUnity.Editor.Services.AssetGen
         private static void Register(AssetGenJob job, Runner runner)
         {
             runner.StartedAt = Now();
+            if (job.DeadlineUnixMs == 0) job.DeadlineUnixMs = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() + (long)(TimeoutSeconds * 1000);
             Jobs[job.JobId] = job;
             Runners[job.JobId] = runner;
             Persist(job);
@@ -352,7 +489,7 @@ namespace MCPForUnity.Editor.Services.AssetGen
         {
             if (IsTerminal(r.Job.State)) { Finalize(r); return; }
             if (r.Canceled) { r.Job.State = AssetGenJobState.Canceled; Persist(r.Job); Finalize(r); return; }
-            if (Now() - r.StartedAt > TimeoutSeconds) { Fail(r, $"Timed out after {TimeoutSeconds:0}s."); return; }
+            if ((r.Job.Provider == "meshy" && DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() > r.Job.DeadlineUnixMs) || Now() - r.StartedAt > TimeoutSeconds) { Fail(r, $"Timed out after {TimeoutSeconds:0}s."); return; }
 
             try
             {
@@ -370,6 +507,9 @@ namespace MCPForUnity.Editor.Services.AssetGen
                         if (Faulted(r.SubmitTask, out string subErr)) { Fail(r, subErr); break; }
                         r.ProviderJobId = r.SubmitTask.Result;
                         if (string.IsNullOrEmpty(r.ProviderJobId)) { Fail(r, "Provider returned no job id."); break; }
+                        if (r.Job.Kind != "marketplace" && r.Job.Provider != "meshy")
+                            r.Job.ProviderTaskId = r.ProviderJobId;
+                        Persist(r.Job);
                         r.NextPollAt = Now();
                         r.Phase = RunnerPhase.Poll;
                         break;
@@ -392,6 +532,7 @@ namespace MCPForUnity.Editor.Services.AssetGen
                             if (pr.InlineData != null && pr.InlineData.Length > 0)
                             {
                                 r.LocalPath = WriteFile(r, pr.InlineData);
+                                r.Job.DownloadedPath = r.LocalPath;
                                 r.Job.State = AssetGenJobState.Importing;
                                 Persist(r.Job);
                                 r.Phase = RunnerPhase.Import;
@@ -441,16 +582,15 @@ namespace MCPForUnity.Editor.Services.AssetGen
                             break;
                         }
                         r.LocalPath = WriteFile(r, res.Body);
+                        r.Job.DownloadedPath = r.LocalPath;
                         r.Job.State = AssetGenJobState.Importing;
                         Persist(r.Job);
                         r.Phase = RunnerPhase.Import;
                         break;
 
                     case RunnerPhase.Import:
-                        // The result file was just written via File.WriteAllBytes (outside the
-                        // AssetDatabase). Refresh so Unity registers it before we import it,
-                        // mirroring ImportModelFile. Skipped under the test import seam.
-                        if (ImportOverrideForTests == null) AssetDatabase.Refresh();
+                        // Each pipeline uses ImportAsset on its own result. A global Refresh here
+                        // would also discover unrelated script changes and can trigger a domain reload.
                         AssetGenJob imported = r.ImportFn(r.Job, r.LocalPath);
                         if (imported != null) r.Job = imported;
                         if (r.Job.State != AssetGenJobState.Failed)
@@ -584,17 +724,33 @@ namespace MCPForUnity.Editor.Services.AssetGen
             };
         }
 
-        private static void Persist(AssetGenJob job)
+        private static void Persist(AssetGenJob job, bool requireDurable = false)
         {
             try
             {
+                job.UpdatedAtUnixMs = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
                 SessionState.SetString(JobKeyPrefix + job.JobId, JsonConvert.SerializeObject(job));
                 string index = SessionState.GetString(JobIndexKey, string.Empty);
                 var ids = new HashSet<string>(index.Split(new[] { ',' }, StringSplitOptions.RemoveEmptyEntries));
                 if (ids.Add(job.JobId))
                     SessionState.SetString(JobIndexKey, string.Join(",", ids));
             }
-            catch { /* persistence is best-effort */ }
+            catch { /* SessionState is a fallback; Meshy also has an atomic disk journal. */ }
+            if (job.Provider == "meshy" && job.Kind == "model")
+            {
+                try {
+                    Directory.CreateDirectory(JournalDirectory);
+                    string file = Path.Combine(JournalDirectory, job.JobId + ".json");
+                    string temp = file + ".tmp";
+                    File.WriteAllText(temp, JsonConvert.SerializeObject(job));
+                    if (File.Exists(file)) File.Replace(temp, file, null);
+                    else File.Move(temp, file);
+                }
+                catch (Exception e) {
+                    if (requireDurable) throw new IOException("Cannot persist Meshy task checkpoint; generation will not be retried automatically. " + SecretRedactor.Scrub(e.Message));
+                    Debug.LogWarning("Cannot persist Meshy task journal: " + SecretRedactor.Scrub(e.Message));
+                }
+            }
         }
 
         private static bool Faulted(Task t, out string error)
@@ -622,6 +778,9 @@ namespace MCPForUnity.Editor.Services.AssetGen
 
         internal static void ResetForTests()
         {
+            EditorApplication.update -= RestoreWhenReady;
+            if (_journalDirectoryForTests != null && Directory.Exists(_journalDirectoryForTests)) Directory.Delete(_journalDirectoryForTests, true);
+            _journalDirectoryForTests = Path.Combine(Path.GetTempPath(), "mcp_assetgen_journal_" + Guid.NewGuid().ToString("N"));
             foreach (var r in new List<Runner>(Runners.Values))
             {
                 try { r.Cts?.Cancel(); r.Cts?.Dispose(); } catch { }

@@ -3,7 +3,7 @@
 The `generate_model` MCP tool and `unity-mcp asset-gen generate-model` CLI expose
 current Text-to-3D preview/refine and Image-to-3D creation parameters. Provider
 credentials remain in the Unity secure store. These additions do not implement
-cloud task listing/deletion, SSE, task recovery, rigging or animation endpoints.
+cloud task listing/deletion, SSE, rigging or animation endpoints. Local Meshy job recovery and attaching known remote task IDs are supported.
 
 ## Defaults and model selection
 
@@ -131,3 +131,67 @@ other Unity projects or global MCP configuration to the fork.
 Parameter contract checked on 2026-10-04:
 - https://docs.meshy.ai/en/api/text-to-3d
 - https://docs.meshy.ai/en/api/image-to-3d
+
+
+## Script reloads and Meshy task recovery
+
+Meshy task records are saved atomically under `Library/MCPForUnity/AssetGenJobs/`
+and mirrored to Unity SessionState. They contain local/remote task IDs, the
+image/text endpoint, preview/refine state, the import destination and any completed
+download path. API keys are never included; recovery reads the secure store again.
+Records survive script reloads and editor restarts while Library is retained.
+Deleting Library removes the disk history; keep remote IDs separately if needed.
+
+An acknowledged Meshy generation automatically resumes polling after a reload.
+The original local `job_id` continues working. If the file was already downloaded,
+recovery imports that same file instead of generating or downloading another copy.
+Image tasks use `/openapi/v1/image-to-3d`; text preview/refine tasks use their own
+`/openapi/v2/text-to-3d` endpoint. Preview and refine IDs are saved separately.
+Text workflows may still submit their *not-yet-created* refine stage once; existing
+geometry/refine tasks are not recreated. T2/7.1 image-only policy remains unchanged.
+
+The status response (including failure/cancellation) exposes `provider_task_id`,
+`provider_root_task_id`, `resumable` and `submission_unknown`. Discover prior jobs:
+
+```json
+{"action":"list_jobs","limit":20}
+```
+
+Resume after a local timeout, download failure, missing key, or local cancellation:
+
+```json
+{"action":"resume","job_id":"LOCAL_JOB_ID"}
+```
+
+If an old plugin version lost the ID, copy the confirmed remote task ID from Meshy
+and attach it explicitly. `mode` selects the endpoint; it is required for this form:
+
+```json
+{"action":"resume","provider":"meshy","provider_task_id":"REMOTE_TASK_ID","mode":"image","format":"glb","output_folder":"Assets/Generated/Models"}
+```
+
+Attaching a remote ID never sends a generation/refine POST. For text tasks, attach
+the refine ID for a textured result; attaching a preview ID imports its geometry.
+Repeated attachment of the same tracked task reuses the local job. Remote task
+expiry/deletion or missing output formats remain provider errors.
+
+```powershell
+unity-mcp asset-gen list-model-jobs
+unity-mcp asset-gen resume-model --job-id LOCAL_JOB_ID
+unity-mcp asset-gen resume-model --provider-task-id REMOTE_TASK_ID --mode image
+```
+
+Canceled and failed jobs are not automatically restarted. Local cancel does not
+cancel a provider's remote paid task. Automatic recovery keeps the original local
+timeout deadline; explicit resume grants a fresh polling window.
+
+There is an unavoidable ambiguous case: the editor may reload after a POST is sent
+but before its response ID arrives. The journal records this submission intent,
+stops with an actionable message, and never blindly repeats the paid POST. Confirm
+the task in Meshy and attach its ID. Existing old-version tasks without stored IDs
+cannot be reconstructed from local history alone.
+
+Automatic recovery currently covers **Meshy 3D models**. Other asset providers keep
+their existing reload behavior. Import pipelines now target the generated file or
+extracted directory with `ImportAsset`, avoiding a whole-project `Refresh`; this
+does not suppress legitimate recompilation caused by script/package changes.

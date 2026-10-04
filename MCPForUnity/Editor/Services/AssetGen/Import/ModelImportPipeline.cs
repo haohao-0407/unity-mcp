@@ -93,7 +93,6 @@ namespace MCPForUnity.Editor.Services.AssetGen.Import
             // Assets/ — scripts/assemblies are skipped so they can't be compiled on import.
             SafeZipExtractor.ExtractTo(zipAbs, folderAbs, ArchiveAllowedExtensions);
 
-            AssetDatabase.Refresh();
             AssetDatabase.ImportAsset(folderRel, ImportAssetOptions.ImportRecursive | ImportAssetOptions.ForceUpdate);
 
             string modelRel = FindFirstModel(folderAbs);

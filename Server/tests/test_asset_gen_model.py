@@ -235,3 +235,27 @@ def test_meshy_options_visible_in_mcp_schema():
     schema = Tool.from_function(generate_model).parameters
     for name in ("model_type", "target_polycount", "texture_resolution", "enable_pbr", "texture_model", "target_formats", "preview_task_id"):
         assert name in schema["properties"]
+
+
+def test_resume_meshy_remote_task_mapping():
+    _, args = _call_tool(action="resume", provider="meshy", provider_task_id="remote-task", mode="image")
+    assert args[-1]["provider_task_id"] == "remote-task"
+    assert args[-1]["action"] == "resume"
+    assert "prompt" not in args[-1]
+
+
+def test_list_jobs_mapping():
+    _, args = _call_tool(action="list_jobs", limit=20)
+    assert args[-1] == {"action": "list_jobs", "limit": 20}
+
+
+def test_resume_cli(cli_runner):
+    result, mock_run = cli_runner(["resume-model", "--provider-task-id", "remote-task", "--mode", "image"])
+    assert result.exit_code == 0, result.output
+    assert mock_run.call_args.args[1] == {"action": "resume", "provider": "meshy", "provider_task_id": "remote-task", "mode": "image"}
+
+
+def test_list_model_jobs_cli(cli_runner):
+    result, mock_run = cli_runner(["list-model-jobs", "--limit", "10"])
+    assert result.exit_code == 0, result.output
+    assert mock_run.call_args.args[1] == {"action": "list_jobs", "limit": 10}

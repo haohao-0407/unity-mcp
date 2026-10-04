@@ -29,17 +29,33 @@ namespace MCPForUnity.Editor.Tools.AssetGen
                 case AssetGenJobState.Done:
                     return new SuccessResponse(
                         $"{kindLabel} generated: {job.AssetPath}",
-                        new { state = "done", asset_path = job.AssetPath, asset_guid = job.AssetGuid, progress = 1f });
+                        JobData(job));
                 case AssetGenJobState.Failed:
-                    return new ErrorResponse(job.Error ?? "Generation failed.", new { state = "failed" });
+                    return new ErrorResponse(job.Error ?? "Generation failed.", JobData(job));
                 case AssetGenJobState.Canceled:
-                    return new SuccessResponse("Generation canceled.", new { state = "canceled" });
+                    return new SuccessResponse("Generation canceled.", JobData(job));
                 default:
                     return new PendingResponse(
                         $"{kindLabel} {job.State.ToString().ToLowerInvariant()} ({job.Progress:P0}).",
                         pollIntervalSeconds: pollIntervalSeconds,
-                        data: new { job_id = job.JobId, state = job.State.ToString().ToLowerInvariant(), progress = job.Progress });
+                        data: JobData(job));
             }
+        }
+
+        public static object JobData(AssetGenJob job) => new {
+            job_id = job.JobId, provider = job.Provider, state = job.State.ToString().ToLowerInvariant(),
+            progress = job.Progress, asset_path = job.AssetPath, asset_guid = job.AssetGuid,
+            provider_task_id = job.ProviderTaskId, provider_root_task_id = job.ProviderRootTaskId,
+            resumable = job.CanResume, submission_unknown = job.MeshyCheckpoint?.SubmissionPending == true,
+            error = job.Error
+        };
+
+        public static object ListModelJobs(ToolParams p)
+        {
+            int limit = p.GetInt("limit", 20) ?? 20;
+            if (limit < 1 || limit > 200) return new ErrorResponse("limit must be 1..200.");
+            var jobs = AssetGenJobManager.RecentJobs(int.MaxValue).Where(j => j.Kind == "model").Take(limit).Select(JobData).ToArray();
+            return new SuccessResponse("Local model jobs, including persisted Meshy tasks.", new { jobs });
         }
 
         /// <summary>Request cancellation of a job by id.</summary>

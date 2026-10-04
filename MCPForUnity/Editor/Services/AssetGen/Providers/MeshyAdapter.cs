@@ -10,6 +10,22 @@ using UnityEngine;
 
 namespace MCPForUnity.Editor.Services.AssetGen.Providers
 {
+    /// <summary>Non-secret state needed to resume an acknowledged Meshy task.</summary>
+    public sealed class MeshyTaskCheckpoint
+    {
+        public string RootTaskId;
+        public string RefineTaskId;
+        public bool SubmissionPending;
+        public bool IsImage;
+        public bool WantTexture;
+        public bool DirectRefine;
+        public bool RefineSubmitted;
+        public string Format;
+        public string AiModel;
+        public JObject RefineBody;
+        public string CurrentTaskId => RefineTaskId ?? RootTaskId;
+    }
+
     /// <summary>
     /// Meshy model provider. Text→3D posts a "preview" task to the v2 text-to-3d endpoint (geometry
     /// only); when textures are requested it then issues a "refine" task and surfaces the textured
@@ -35,6 +51,28 @@ namespace MCPForUnity.Editor.Services.AssetGen.Providers
         private bool _directRefine;
         private string _refineTaskId;
         private bool _refineSubmitted;
+        private string _rootTaskId;
+        private bool _submissionPending;
+        // Called before POST and immediately after the response ID is received, not on a later tick.
+        internal Action<MeshyTaskCheckpoint> Checkpoint;
+
+        internal MeshyTaskCheckpoint Capture() => new MeshyTaskCheckpoint {
+            RootTaskId = _rootTaskId, RefineTaskId = _refineTaskId, SubmissionPending = _submissionPending,
+            IsImage = _isImage, WantTexture = _wantTexture, DirectRefine = _directRefine,
+            RefineSubmitted = _refineSubmitted, Format = _format, AiModel = _aiModel,
+            RefineBody = _isImage ? null : (JObject)_refineBody?.DeepClone()
+        };
+
+        internal void Restore(MeshyTaskCheckpoint state)
+        {
+            if (state == null || state.SubmissionPending || string.IsNullOrWhiteSpace(state.RootTaskId))
+                throw new ArgumentException("Remote submission outcome is unknown. Supply the confirmed Meshy provider_task_id; do not resubmit generation.");
+            _rootTaskId = state.RootTaskId; _refineTaskId = state.RefineTaskId;
+            _isImage = state.IsImage; _wantTexture = state.WantTexture; _directRefine = state.DirectRefine;
+            _refineSubmitted = state.RefineSubmitted; _format = state.Format ?? "glb";
+            _aiModel = state.AiModel; _refineBody = (JObject)state.RefineBody?.DeepClone();
+            _submissionPending = false;
+        }
 
         public async Task<string> SubmitAsync(ModelGenRequest req, string apiKey, IHttpTransport http, CancellationToken ct)
         {
@@ -43,6 +81,8 @@ namespace MCPForUnity.Editor.Services.AssetGen.Providers
 
             var options = req.Meshy ?? new MeshyModelOptions();
             options.Validate(req);
+            _rootTaskId = null;
+            _submissionPending = false;
             _refineSubmitted = false;
             _refineTaskId = null;
             _directRefine = !string.IsNullOrEmpty(options.PreviewTaskId);
@@ -102,7 +142,7 @@ namespace MCPForUnity.Editor.Services.AssetGen.Providers
             // image tasks live on the v1 image endpoint; preview/refine tasks on v2 text-to-3d.
             string statusBase = (_isImage && !refinePhase) ? ImageEndpoint : TextEndpoint;
 
-            var spec = new HttpRequestSpec { Method = "GET", Url = statusBase + "/" + pollId };
+            var spec = new HttpRequestSpec { Method = "GET", Url = statusBase + "/" + Uri.EscapeDataString(pollId) };
             spec.Headers["Authorization"] = "Bearer " + apiKey;
 
             HttpResult res = await http.SendAsync(spec, ct);
@@ -152,7 +192,7 @@ namespace MCPForUnity.Editor.Services.AssetGen.Providers
         }
 
         /// <summary>POST a task body and return its <c>result</c> task id (or null).</summary>
-        private static async Task<string> PostTask(string url, JObject body, string apiKey, IHttpTransport http, CancellationToken ct, string phase)
+        private async Task<string> PostTask(string url, JObject body, string apiKey, IHttpTransport http, CancellationToken ct, string phase)
         {
             var spec = new HttpRequestSpec
             {
@@ -163,12 +203,18 @@ namespace MCPForUnity.Editor.Services.AssetGen.Providers
             };
             spec.Headers["Authorization"] = "Bearer " + apiKey;
 
+            _submissionPending = true;
+            Checkpoint?.Invoke(Capture()); // Durable intent before a potentially chargeable request.
             HttpResult res = await http.SendAsync(spec, ct);
             JObject json = ParseOk(res, apiKey, phase);
             string id = json["result"]?.ToString();
             if (string.IsNullOrEmpty(id))
                 throw new Exception(SecretRedactor.Scrub(
                     $"Meshy {phase} returned no task id: " + ProviderHttp.Truncate(ProviderHttp.BodyText(res)), apiKey));
+            if (_rootTaskId == null) _rootTaskId = id;
+            else if (phase == "refine") { _refineTaskId = id; _refineSubmitted = true; }
+            _submissionPending = false;
+            Checkpoint?.Invoke(Capture());
             return id;
         }
 

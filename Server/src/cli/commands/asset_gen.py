@@ -138,6 +138,33 @@ def generate_model(
     _emit(result, config, "Generation")
 
 
+@asset_gen.command("resume-model")
+@click.option("--job-id", default=None, help="Persisted local Meshy job ID.")
+@click.option("--provider-task-id", default=None, help="Existing Meshy remote task ID (requires --mode).")
+@click.option("--mode", type=click.Choice(["image", "text"]), default=None)
+@click.option("--format", "fmt", default=None)
+@click.option("--name", default=None)
+@click.option("--output-folder", default=None)
+@handle_unity_errors
+def resume_model(job_id, provider_task_id, mode, fmt, name, output_folder):
+    """Resume an existing Meshy task without resubmitting generation."""
+    config = get_config()
+    params = {"action": "resume", "provider": "meshy", "jobId": job_id,
+              "provider_task_id": provider_task_id, "mode": mode, "format": fmt,
+              "name": name, "outputFolder": output_folder}
+    result = run_command("generate_model", {k: v for k, v in params.items() if v is not None}, config)
+    _emit(result, config, "Resume")
+
+
+@asset_gen.command("list-model-jobs")
+@click.option("--limit", default=20, type=click.IntRange(1, 200))
+@handle_unity_errors
+def list_model_jobs(limit):
+    """List local model jobs and persisted Meshy remote task IDs."""
+    config = get_config()
+    _emit(run_command("generate_model", {"action": "list_jobs", "limit": limit}, config), config, "Jobs")
+
+
 @asset_gen.command("import-model")
 @click.option("--uid", required=True, help="Sketchfab model uid to import.")
 @click.option("--target-size", default=None, type=float, help="Normalize largest dimension (meters).")
