@@ -73,10 +73,10 @@ namespace MCPForUnity.Editor.Services.AssetGen
             new ModelEntry { Id = TripoAdapter.ModelVersion, Label = "Tripo v3.1", Provider = "tripo", Kind = "model", UseCase = "Text / image -> 3D" },
             new ModelEntry { Id = "P1-20260311", Label = "Tripo P1 (premium)", Provider = "tripo", Kind = "model", UseCase = "Premium 3D" },
             new ModelEntry { Id = MeshyAdapter.DefaultModel, Label = "Meshy 6", Provider = "meshy", Kind = "model", UseCase = "Text / image -> 3D" },
-            new ModelEntry { Id = "meshy-7.1", Label = "Meshy 7.1", Provider = "meshy", Kind = "model", UseCase = "High-detail text / image -> 3D" },
-            new ModelEntry { Id = "meshy-t2", Label = "Meshy T2", Provider = "meshy", Kind = "model", UseCase = "Smart Topology / game assets" },
+            new ModelEntry { Id = "meshy-7.1", Label = "Meshy 7.1", Provider = "meshy", Kind = "model", UseCase = "High-detail image -> 3D; reference image required", Modes = new[] { "image" } },
+            new ModelEntry { Id = "meshy-t2", Label = "Meshy T2", Provider = "meshy", Kind = "model", UseCase = "Smart Topology / game assets; reference image required", Modes = new[] { "image" } },
             new ModelEntry { Id = "meshy-6-lite", Label = "Meshy 6 Lite", Provider = "meshy", Kind = "model", UseCase = "Text / image -> 3D (2k textures only)" },
-            new ModelEntry { Id = "latest", Label = "Meshy Latest", Provider = "meshy", Kind = "model", UseCase = "Latest standard model" },
+            new ModelEntry { Id = "latest", Label = "Meshy Latest", Provider = "meshy", Kind = "model", UseCase = "Latest standard model; reference image required", Modes = new[] { "image" } },
             new ModelEntry { Id = FalModelAdapter.DefaultModel, Label = "Hunyuan3D", Provider = "fal", Kind = "model", UseCase = "Text -> 3D", Modes = new[] { "text" } },
 
             // Audio — fal (order: stable-audio, cassette SFX, cassette music, lyria). DurationField

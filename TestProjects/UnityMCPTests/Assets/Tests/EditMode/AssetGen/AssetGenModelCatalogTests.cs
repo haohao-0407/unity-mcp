@@ -95,5 +95,15 @@ namespace MCPForUnityTests.Editor.AssetGen
             Assert.AreEqual("audio", e.Kind);
             Assert.IsNull(AssetGenModelCatalog.Find("does/not/exist"));
         }
+
+        [Test]
+        public void MeshyCatalog_AdvertisesImageOnlyModels_AndOmitsT1()
+        {
+            foreach (string model in new[] { "meshy-t2", "meshy-7.1", "latest" })
+                CollectionAssert.AreEqual(new[] { "image" }, AssetGenModelCatalog.Find(model).Modes);
+            foreach (string model in new[] { "meshy-t1", "t1", "lowpoly" })
+                Assert.IsNull(AssetGenModelCatalog.Find(model));
+        }
+
     }
 }

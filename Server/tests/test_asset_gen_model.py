@@ -201,11 +201,14 @@ class TestGenerateModelCLI:
     def test_meshy_cli_parameters(self, cli_runner):
         result, mock_run = cli_runner([
             "generate-model", "--provider", "meshy", "--model", "meshy-t2",
+            "--mode", "image", "--image-path", "Assets/ref.png",
             "--target-polycount", "4000", "--texture-resolution", "4k", "--enable-pbr",
             "--no-moderation", "--target-formats", "glb", "--target-formats", "fbx",
         ])
         assert result.exit_code == 0, result.output
         params = mock_run.call_args.args[1]
+        assert params["mode"] == "image"
+        assert params["imagePath"] == "Assets/ref.png"
         assert params["target_polycount"] == 4000
         assert params["texture_resolution"] == "4k"
         assert params["enable_pbr"] is True

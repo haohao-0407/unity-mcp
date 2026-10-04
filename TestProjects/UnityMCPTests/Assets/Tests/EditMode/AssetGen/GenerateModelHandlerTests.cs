@@ -1,6 +1,7 @@
 using System;
 using System.IO;
 using MCPForUnity.Editor.Security;
+using MCPForUnity.Editor.Helpers;
 using MCPForUnity.Editor.Services.AssetGen;
 using MCPForUnity.Editor.Services.AssetGen.Http;
 using MCPForUnity.Editor.Tools.AssetGen;
@@ -110,13 +111,16 @@ namespace MCPForUnityTests.Editor.AssetGen
             finally { try { File.Delete(tmp); } catch { } }
         }
 
-        [Test]
-        public void Generate_ImageMode_ProjectLocalPath_Accepted_ReturnsPending()
+        [TestCase("meshy-6")]
+        [TestCase("meshy-t2")]
+        [TestCase("meshy-7.1")]
+        [TestCase("latest")]
+        public void Generate_ImageMode_ProjectLocalPath_Accepted_ReturnsPending(string model)
         {
             _store.Set("meshy", "k");
             string rel = WriteProjectFile("Assets/Generated/__assetgen_model_handler/ref.png", new byte[] { 137, 80, 78, 71 });
 
-            JObject gen = Call(new JObject { ["action"] = "generate", ["provider"] = "meshy", ["mode"] = "image", ["imagePath"] = rel });
+            JObject gen = Call(new JObject { ["action"] = "generate", ["provider"] = "meshy", ["mode"] = "image", ["imagePath"] = rel, ["model"] = model });
 
             Assert.AreEqual("pending", (string)gen["_mcp_status"]);
         }
@@ -183,7 +187,7 @@ namespace MCPForUnityTests.Editor.AssetGen
         public void Meshy_ExistingPreview_DoesNotRequirePrompt()
         {
             _store.Set("meshy", "k");
-            var result = Call(new JObject { ["action"] = "generate", ["provider"] = "meshy", ["preview_task_id"] = "existing" });
+            var result = Call(new JObject { ["action"] = "generate", ["provider"] = "meshy", ["model"] = "meshy-6", ["preview_task_id"] = "existing" });
             Assert.AreEqual("pending", (string)result["_mcp_status"]);
         }
 
@@ -200,7 +204,7 @@ namespace MCPForUnityTests.Editor.AssetGen
         public void Meshy_AutoSize_PreservesCloudSizeUnlessExplicitlyOverridden(bool overrideSize)
         {
             _store.Set("meshy", "k");
-            var p = new JObject { ["action"] = "generate", ["provider"] = "meshy", ["prompt"] = "tower", ["auto_size"] = true };
+            var p = new JObject { ["action"] = "generate", ["provider"] = "meshy", ["model"] = "meshy-6", ["prompt"] = "tower", ["auto_size"] = true };
             if (overrideSize) p["target_size"] = 2f;
             var response = Call(p);
             string id = (string)response["data"]["job_id"];
@@ -208,26 +212,61 @@ namespace MCPForUnityTests.Editor.AssetGen
         }
 
         [Test]
-        public void Meshy_HandlerOptions_ReachPreviewAndDefault4kRefine()
+        public void Meshy_HandlerOptions_ReachImageRequestWithDefault4k()
         {
             _store.Set("meshy", "k");
-            var fake = new FakeHttpTransport { Handler = request => new HttpResult {
-                Status = 200, IsSuccess = true, Text = request.Method == "POST"
-                    ? "{\"result\":\"task\"}" : "{\"status\":\"SUCCEEDED\",\"progress\":100}" } };
+            var fake = new FakeHttpTransport { Handler = _ => new HttpResult {
+                Status = 200, IsSuccess = true, Text = "{\"result\":\"task\"}" } };
             AssetGenJobManager.TransportOverrideForTests = fake;
-            AssetGenJobManager.PollIntervalSeconds = 0;
-            var p = new JObject { ["action"] = "generate", ["provider"] = "meshy", ["prompt"] = "tower",
-                ["model_type"] = "smart-topology", ["target_polycount"] = 4000, ["enable_pbr"] = true };
-            var response = Call(p);
+            var response = Call(new JObject { ["action"] = "generate", ["provider"] = "meshy",
+                ["mode"] = "image", ["image_url"] = "https://example.com/ref.png",
+                ["model_type"] = "smart-topology", ["target_polycount"] = 4000, ["enable_pbr"] = true });
+            Assert.AreEqual("pending", (string)response["_mcp_status"]);
             string id = (string)response["data"]["job_id"];
-            for (int i = 0; i < 20 && fake.RecordedRequests.Count < 3; i++) AssetGenJobManager.TryAdvanceForTests(id);
-            Assert.GreaterOrEqual(fake.RecordedRequests.Count, 3);
-            var preview = JObject.Parse(System.Text.Encoding.UTF8.GetString(fake.RecordedRequests[0].Body));
-            var refine = JObject.Parse(System.Text.Encoding.UTF8.GetString(fake.RecordedRequests[2].Body));
-            Assert.AreEqual("meshy-t2", (string)preview["ai_model"]);
-            Assert.AreEqual(4000, (int)preview["target_polycount"]);
-            Assert.AreEqual("4k", (string)refine["texture_resolution"]);
-            Assert.AreEqual(true, (bool)refine["enable_pbr"]);
+            for (int i = 0; i < 20 && fake.RecordedRequests.Count == 0; i++) AssetGenJobManager.TryAdvanceForTests(id);
+            Assert.AreEqual(1, fake.RecordedRequests.Count);
+            var body = JObject.Parse(System.Text.Encoding.UTF8.GetString(fake.RecordedRequests[0].Body));
+            StringAssert.EndsWith("/image-to-3d", fake.RecordedRequests[0].Url);
+            Assert.AreEqual("meshy-t2", (string)body["ai_model"]);
+            Assert.AreEqual(4000, (int)body["target_polycount"]);
+            Assert.AreEqual("4k", (string)body["texture_resolution"]);
+            Assert.AreEqual(true, (bool)body["enable_pbr"]);
         }
+
+
+        [TestCase("meshy-t2", "requires a reference image")]
+        [TestCase("meshy-7.1", "requires a reference image")]
+        [TestCase("latest", "requires a reference image")]
+        [TestCase("meshy-t1", "deprecated and disabled")]
+        public void Meshy_PolicyRejectsExplicitAndSavedModels(string model, string message)
+        {
+            string previous = AssetGenPrefs.GetSelectedModel("model", "meshy");
+            try
+            {
+                _store.Set("meshy", "k");
+                AssetGenPrefs.SetSelectedModel("model", "meshy", model);
+                foreach (bool explicitModel in new[] { true, false })
+                {
+                    var p = new JObject { ["action"] = "generate", ["provider"] = "meshy", ["prompt"] = "tower" };
+                    if (explicitModel) p["model"] = model;
+                    var result = Call(p);
+                    Assert.AreEqual(false, (bool)result["success"]);
+                    StringAssert.Contains(message, (string)result["error"]);
+                    Assert.IsNull(result["_mcp_status"]);
+                }
+                Assert.AreEqual(0, ((FakeHttpTransport)AssetGenJobManager.TransportOverrideForTests).RecordedRequests.Count);
+            }
+            finally { AssetGenPrefs.SetSelectedModel("model", "meshy", previous); }
+        }
+
+        [Test]
+        public void Meshy_InferredT2_RequiresImageBeforeCredentials()
+        {
+            var result = Call(new JObject { ["action"] = "generate", ["provider"] = "meshy",
+                ["model_type"] = "smart-topology", ["prompt"] = "tower" });
+            Assert.AreEqual(false, (bool)result["success"]);
+            StringAssert.Contains("requires a reference image", (string)result["error"]);
+        }
+
     }
 }

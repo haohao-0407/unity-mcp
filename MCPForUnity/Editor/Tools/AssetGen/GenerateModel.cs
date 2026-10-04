@@ -52,9 +52,6 @@ namespace MCPForUnity.Editor.Tools.AssetGen
             string provider = (p.Get("provider", "tripo") ?? "tripo").ToLowerInvariant();
             AssetGenProviders.Model(provider); // throws NotSupportedException for unimplemented providers
 
-            if (!SecureKeyStore.Current.Has(provider))
-                return new ErrorResponse(AssetGenProviders.MissingKeyMessage(provider));
-
             // Empty -> GUI-selected model -> catalog default. Null still reaches the adapter's own
             // default (Tripo ModelVersion / Meshy meshy-6).
             string model = AssetGenModelCatalog.ResolveModel("model", provider, p.Get("model"));
@@ -80,7 +77,7 @@ namespace MCPForUnity.Editor.Tools.AssetGen
 
             if (req.Meshy != null)
             {
-                if (req.Meshy.ModelType == "smart-topology" && string.IsNullOrWhiteSpace(p.Get("model")))
+                if (string.Equals(req.Meshy.ModelType?.Trim(), "smart-topology", StringComparison.OrdinalIgnoreCase) && string.IsNullOrWhiteSpace(p.Get("model")))
                     req.Model = "meshy-t2";
                 req.Meshy.Validate(req);
                 if (req.Meshy.AutoSize == true && !p.Has("targetSize")) req.TargetSize = 0f;
@@ -97,6 +94,9 @@ namespace MCPForUnity.Editor.Tools.AssetGen
                     return new ErrorResponse(imgErr);
                 req.ImagePath = absImg;
             }
+
+            if (!SecureKeyStore.Current.Has(provider))
+                return new ErrorResponse(AssetGenProviders.MissingKeyMessage(provider));
 
             AssetGenJob job = AssetGenJobManager.StartModelGeneration(req);
             if (job.State == AssetGenJobState.Failed)

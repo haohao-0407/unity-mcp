@@ -28,7 +28,7 @@ from transport.legacy.unity_connection import async_send_command_with_retry
         "prompt, image_path|image_url, format (glb|fbx|obj|usdz), target_size, texture, "
         "tier, model, name, output_folder. Meshy also supports geometry/topology, PBR, "
         "texture guidance, output and sizing options; texture_resolution defaults to 4k. "
-        "Use model=meshy-t2 for Smart Topology. Use preview_task_id to texture an existing preview.\n"
+        "Meshy T2, 7.1 and latest require mode=image and image_path/image_url/input_task_id. Generate and inspect a reference image first; text fallback is disabled. T1/lowpoly is disabled. Use preview_task_id with text-capable geometry models to texture an existing preview.\n"
         "- status: Poll an async job by job_id -> { state, progress, assetPath?, error? }.\n"
         "- cancel: Cancel an in-flight job by job_id.\n"
         "- list_providers: List configured 3D providers and capabilities (no key values).\n"
@@ -46,7 +46,7 @@ async def generate_model(
                       "Action to perform."],
 
     provider: Annotated[str, "Provider id (tripo, meshy, fal). fal supports GLB output."] | None = None,
-    mode: Annotated[str, "Generation mode: text or image."] | None = None,
+    mode: Annotated[str, "Generation mode: text or image. Meshy T2/7.1/latest require image mode and a reference image."] | None = None,
     prompt: Annotated[str, "Text prompt for text->3D."] | None = None,
     image_path: Annotated[str, "Path to a source image for image->3D."] | None = None,
     image_url: Annotated[str, "URL of a source image for image->3D."] | None = None,
@@ -65,7 +65,7 @@ async def generate_model(
     pose_mode: Annotated[str, "Meshy pose: empty string, a-pose, or t-pose."] | None = None,
     enable_pbr: Annotated[bool, "Generate Meshy PBR maps in addition to base color."] | None = None,
     texture_resolution: Annotated[str, "Meshy texture resolution: 2k, 4k (default), or 8k. 6-lite requires 2k."] | None = None,
-    texture_model: Annotated[str, "Meshy text refine model override. T2 defaults to meshy-7.1 for texturing; image mode cannot override."] | None = None,
+    texture_model: Annotated[str, "Meshy text refine model override for text-capable geometry models; image mode cannot override."] | None = None,
     texture_prompt: Annotated[str, "Meshy texturing guidance, max 800 characters; exclusive with texture_image_url."] | None = None,
     texture_image_url: Annotated[str, "Meshy texture reference image URL or data URI; exclusive with texture_prompt."] | None = None,
     remove_lighting: Annotated[bool, "Meshy 6 only: remove baked lighting from base color."] | None = None,

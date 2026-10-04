@@ -11,14 +11,23 @@ cloud task listing/deletion, SSE, task recovery, rigging or animation endpoints.
   6 Lite, 7.1, T2 and `latest`; a saved GUI model selection still takes precedence.
 - `model="meshy-t2"` automatically sends `model_type="smart-topology"`.
   Selecting `model_type="smart-topology"` without `model` chooses T2.
+- **Fork policy: T2, 7.1, `latest` and the legacy `meshy-7` alias require image mode
+  and a non-empty `image_path`, `image_url` or completed image-generation `input_task_id`.**
+  Generate and inspect the reference image first, then submit it with `mode="image"`.
+  Text mode (including a `preview_task_id`) is rejected for these geometry models;
+  texture reference images alone do not satisfy the geometry input requirement.
+  GUI-selected models and inferred T2 selections obey the same rule. No model or
+  text-to-3D fallback is performed. This is a fork policy, not an API capability claim.
+- **T1 is disabled**, including `meshy-t1`, `t1` and the deprecated `lowpoly` entry.
+  Explicit IDs and saved selections are rejected before any generation request.
 - Text generation uses preview followed by refine when `texture=true` (default).
   `texture=false` produces geometry only. Image generation uses one API task.
 - **Texturing defaults to `texture_resolution="4k"`**, sent explicitly to Meshy.
   Set `2k` or `8k` to override it. Meshy 6 Lite needs explicit `2k`, or a
   `texture_model="meshy-7.1"` override in text mode. It is not silently downgraded.
-- `texture_model` independently selects the text refine model. T2 defaults to
-  Meshy 7.1 for texturing; other models keep the selected geometry model.
-  Image-to-3D does not accept an independent texture model.
+- `texture_model` independently selects the text refine model for text-capable
+  geometry models such as Meshy 6. This texture-only override does not generate
+  geometry. Image-to-3D does not accept an independent texture model.
 - `enable_pbr` is opt-in, retaining Meshy's default when omitted.
 
 ## Parameter reference
@@ -75,9 +84,9 @@ T2 game prop with PBR and default 4K textures:
 {
   "action": "generate",
   "provider": "meshy",
-  "mode": "text",
+  "mode": "image",
   "model": "meshy-t2",
-  "prompt": "A stylized stone lighthouse for a game",
+  "image_path": "Assets/Generated/References/lighthouse.png",
   "target_polycount": 4000,
   "enable_pbr": true,
   "target_formats": ["glb"],
@@ -91,6 +100,8 @@ Texture an existing preview without paying to regenerate geometry:
 {
   "action": "generate",
   "provider": "meshy",
+  "model": "meshy-6",
+  "mode": "text",
   "preview_task_id": "YOUR_SUCCEEDED_PREVIEW_TASK_ID",
   "texture_model": "meshy-7.1",
   "texture_prompt": "Weathered stone and painted red metal",
@@ -102,7 +113,7 @@ Texture an existing preview without paying to regenerate geometry:
 CLI (repeat `--target-formats` for multiple cloud outputs):
 
 ```powershell
-unity-mcp asset-gen generate-model --provider meshy --model meshy-t2 --prompt "A stone lighthouse" --target-polycount 4000 --enable-pbr --texture-resolution 4k --target-formats glb
+unity-mcp asset-gen generate-model --provider meshy --model meshy-t2 --mode image --image-path Assets/Generated/References/lighthouse.png --target-polycount 4000 --enable-pbr --texture-resolution 4k --target-formats glb
 ```
 
 ## Using this fork locally

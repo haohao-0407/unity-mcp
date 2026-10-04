@@ -96,10 +96,23 @@ namespace MCPForUnity.Editor.Services.AssetGen.Providers
 
         public void Validate(ModelGenRequest req)
         {
+            // Normalize before checking policy so aliases/case cannot bypass image requirements.
+            req.Model = req.Model?.Trim().ToLowerInvariant();
+            req.Mode = req.Mode?.Trim().ToLowerInvariant();
+            ModelType = ModelType?.Trim().ToLowerInvariant();
+            TextureModel = TextureModel?.Trim().ToLowerInvariant();
             bool image = req.Mode == "image";
             bool refine = !string.IsNullOrEmpty(PreviewTaskId);
             string model = GeometryModel(req);
             bool smart = model == "meshy-t2" || ModelType == "smart-topology";
+            if (IsDisabledLegacyModel(model) || IsDisabledLegacyModel(ModelType) || IsDisabledLegacyModel(TextureModel))
+                Fail("Meshy T1 / lowpoly is deprecated and disabled in this fork. Use model=meshy-t2, model_type=smart-topology and mode=image with a reference image.");
+            bool needsImage = model == "meshy-t2" || model == "meshy-7.1" || model == "latest" || model == "meshy-7";
+            if (needsImage && (!image || (string.IsNullOrWhiteSpace(req.ImagePath)
+                && string.IsNullOrWhiteSpace(req.ImageUrl) && string.IsNullOrWhiteSpace(InputTaskId))))
+                Fail($"Meshy model '{model}' requires a reference image in this fork. Generate and inspect an image first, then use mode=image with image_path, image_url or a completed image-generation input_task_id. Text-to-3D fallback is disabled.");
+            if (InputTaskId != null && string.IsNullOrWhiteSpace(InputTaskId))
+                Fail("input_task_id must identify a completed image-generation task; it cannot be empty.");
             Choice(ModelType, "model_type", "standard", "smart-topology");
             Choice(GeometryResolution, "geometry_resolution", "standard", "2k", "4k");
             Choice(Topology, "topology", "triangle", "quad");
@@ -154,6 +167,9 @@ namespace MCPForUnity.Editor.Services.AssetGen.Providers
                 if (!TargetFormats.Contains(req.Format)) Fail("target_formats must include the format selected for download.");
             }
         }
+
+        private static bool IsDisabledLegacyModel(string value)
+            => value == "meshy-t1" || value == "t1" || value == "lowpoly";
 
         private static void Fail(string message) => throw new ArgumentException(message);
         private static void Choice(string value, string name, params string[] choices)
